@@ -78,19 +78,6 @@ Typical flow: ingest a URL, hold onto the `content_id`, then call transcript or 
 
 ---
 
-## Local development
-
-If you're running the YouLearn backend locally, the MCP server is mounted at `/mcp` on the same FastAPI app:
-
-```bash
-# In youlearn-backend/
-make start
-```
-
-Point your client at `http://localhost:8000/mcp/`. OAuth still works locally — it redirects you through Firebase sign-in just like production.
-
----
-
 ## Limits & auth
 
 - Plan limits apply — free-tier users can hit ingest caps. The tool response includes an upgrade link when that happens.
