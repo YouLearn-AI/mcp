@@ -2,7 +2,7 @@
 
 Ingest content into [YouLearn](https://youlearn.ai) — and pull transcripts and summaries back out — from any MCP client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.).
 
-**Endpoint:** `https://api.youlearn.ai/mcp`
+**Endpoint:** `https://api.youlearn.ai/mcp//`
 
 Auth is OAuth — sign in with your existing YouLearn account the first time you connect. No API keys to manage.
 
@@ -13,7 +13,7 @@ Auth is OAuth — sign in with your existing YouLearn account the first time you
 ### Claude Code
 
 ```bash
-claude mcp add --transport http youlearn https://api.youlearn.ai/mcp
+claude mcp add --transport http youlearn https://api.youlearn.ai/mcp/
 ```
 
 Run `/mcp` inside Claude Code and pick `youlearn` to sign in.
@@ -27,7 +27,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
   "mcpServers": {
     "youlearn": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://api.youlearn.ai/mcp"]
+      "args": ["-y", "mcp-remote", "https://api.youlearn.ai/mcp/"]
     }
   }
 }
@@ -43,7 +43,7 @@ Add to `~/.cursor/mcp.json`:
 {
   "mcpServers": {
     "youlearn": {
-      "url": "https://api.youlearn.ai/mcp"
+      "url": "https://api.youlearn.ai/mcp/"
     }
   }
 }
@@ -51,7 +51,7 @@ Add to `~/.cursor/mcp.json`:
 
 ### Any other MCP client
 
-Point it at `https://api.youlearn.ai/mcp` as a streamable HTTP MCP server. OAuth 2.0 + dynamic client registration is supported, so most clients auto-discover everything.
+Point it at `https://api.youlearn.ai/mcp/` as a streamable HTTP MCP server. OAuth 2.0 + dynamic client registration is supported, so most clients auto-discover everything.
 
 ---
 
@@ -87,7 +87,7 @@ If you're running the YouLearn backend locally, the MCP server is mounted at `/m
 make start
 ```
 
-Point your client at `http://localhost:8000/mcp`. OAuth still works locally — it redirects you through Firebase sign-in just like production.
+Point your client at `http://localhost:8000/mcp/`. OAuth still works locally — it redirects you through Firebase sign-in just like production.
 
 ---
 
