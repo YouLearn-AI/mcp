@@ -1,0 +1,43 @@
+name: Preflight
+
+# Manual trigger only — auto-runs on push and pull_request are handled
+# by the Preflight GitHub App's webhook receiver, configured via the
+# Preflight dashboard (https://preflight-web.prev.youlearn.ai/runs).
+#
+# To run Preflight against the latest commit on `main`, go to the
+# Actions tab → Preflight → "Run workflow".
+#
+# To also auto-trigger from this workflow (e.g. on every push, on PR,
+# only when certain labels are set), uncomment the `push:` / `pull_request:`
+# blocks below AND disable the corresponding webhook triggers on the
+# Preflight dashboard so the run doesn't fire twice.
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflow:
+        description: 'Workflow id override (e.g. voiceos/regression). Leave blank for the tenant default.'
+        required: false
+
+  # Uncomment if you want this Action to ALSO fire on PRs / pushes
+  # (in addition to or instead of the App webhook). Remember to disable
+  # the matching dashboard trigger first to avoid double-fires.
+  #
+  # pull_request:
+  #   types: [opened, synchronize, reopened]
+  # push:
+  #   branches: [main]
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.preflight/actions/preflight
+        with:
+          hmac_secret: ${{ secrets.PREFLIGHT_HMAC_SECRET }}
+          workflow: ${{ inputs.workflow }}
+          # workflow_dispatch implies the user wants this to fire even if
+          # the dispatcher's heuristics would otherwise skip.
+          force: 'true'
