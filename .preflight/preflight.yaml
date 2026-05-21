@@ -1,0 +1,54 @@
+# Preflight QA platform — customer config.
+#
+# This file is read by the Preflight platform (https://preflight.dev)
+# when it dispatches QA runs against this repo. See ./README.md for what
+# each field controls and how runs are triggered.
+#
+# Schema reference: https://github.com/YouLearn-AI/preflight
+schema_version: "1"
+
+product:
+  name: VoiceOS
+  bundle_id: com.voiceos.app
+
+runtime:
+  os: macos
+  version: tahoe
+  arch: arm64
+
+build:
+  # Workspace-root commands run by the QA harness from a clean clone at
+  # the dispatched SHA. install + commands together must produce a
+  # native .app under artifact_glob.
+  install: bun install --frozen-lockfile
+  commands:
+    - bash .preflight/build.sh
+  artifact_glob: dist/**/VoiceOS.app
+  # Build-time env values written to .env in the workspace root before
+  # install runs. Vite's loadEnv() and electron-builder pick this up
+  # automatically. All values below are PUBLIC by design:
+  #   - VITE_SUPABASE_ANON_KEY: anon JWT, Supabase RLS-safe (designed
+  #     for client bundles).
+  #   - VITE_POSTHOG_API_KEY: client-side capture key.
+  #   - VITE_SENTRY_DSN: public Sentry DSN, designed for inclusion in
+  #     compiled bundles.
+  # For real secrets (Stripe keys, server tokens), do not commit them
+  # here — Preflight uses a per-tenant secrets table that's referenced
+  # by `test_account.*_secret` and similar fields.
+  env:
+    VITE_SUPABASE_URL: "https://bqxtklamhmqgkixvgqhc.supabase.co"
+    VITE_SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxeHRrbGFtaG1xZ2tpeHZncWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAyMjY5NTgsImV4cCI6MjA3NTgwMjk1OH0.8Q7ONaJydNvcN58nx-MjN6YNwM2en-8cK76nrtn5MBg"
+    VITE_GRPC_BASE_URL: "https://staging.api.voiceos.com"
+    VITE_POSTHOG_API_KEY: "phc_w0ppTWhcPq9MGgvDoG9b4bR5TaaigHSOLTZ32WejPT8"
+    VITE_POSTHOG_HOST: "https://app.posthog.com"
+    VITE_SENTRY_DSN: "https://a1fdaf6f6a89ce23aa775b726461373b@o4511381893611520.ingest.us.sentry.io/4511381912944640"
+    VITE_SENTRY_ENV: "preflight-qa"
+
+permissions:
+  - microphone
+  - accessibility
+  - screen_capture
+  - audio_capture
+  - apple_events
+  - speech_recognition
+  - all_files

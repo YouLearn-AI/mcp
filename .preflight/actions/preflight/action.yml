@@ -1,0 +1,317 @@
+name: 'Preflight'
+description: 'Trigger a Preflight QA run against the current PR / commit.'
+author: 'YouLearn'
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  dispatcher_url:
+    description: |
+      HTTPS URL of the Preflight dispatcher /dispatch endpoint.
+      Default: https://preflight.youlearn.ai/dispatch.
+    required: false
+    default: 'https://preflight-web.prev.youlearn.ai/api/dispatch'
+  hmac_secret:
+    description: |
+      HMAC-SHA256 secret shared with the dispatcher. Store as a repo
+      secret named PREFLIGHT_HMAC_SECRET (Settings → Secrets and
+      variables → Actions) and reference it via the secrets context
+      from your workflow file (composite actions cannot read secrets
+      directly, so the workflow has to forward the value).
+    required: true
+  workflow:
+    description: |
+      Optional workflow id to run. Omit to use the tenant's default
+      (configured server-side). E.g. "voiceos/regression".
+    required: false
+    default: ''
+  force:
+    description: |
+      "true" to bypass any auto-trigger heuristic the dispatcher applies
+      (e.g. "skip on docs-only PRs"). Useful for `workflow_dispatch`
+      manual triggers where the user explicitly wants a run.
+    required: false
+    default: 'false'
+  wait_for_completion:
+    description: |
+      "true" to block until the dispatched run finishes (or `wait_timeout_s`
+      elapses). Polls `/repos/<repo>/commits/<sha>/check-runs` for the
+      preflight check, then surfaces verdict + report URL in the job
+      summary. Default true so customers see the full result inline.
+    required: false
+    default: 'true'
+  wait_timeout_s:
+    description: |
+      Maximum seconds to wait for the run to complete when
+      `wait_for_completion=true`. Default 21600 (6 hours) — effectively
+      unlimited for any real Preflight workflow. The job-level
+      `timeout-minutes` in the workflow file is the real upper bound;
+      this just protects against a dispatcher that accepted the run but
+      never posts a terminal check-run.
+    required: false
+    default: '21600'
+  github_token:
+    description: |
+      GitHub token used to poll the check-run. Defaults to the workflow's
+      `GITHUB_TOKEN`, which has read-only checks scope by default — that's
+      sufficient for the poll. Override only when the workflow runs in a
+      cross-repo context where the default token can't read checks.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  run_id:
+    description: 'Preflight run id assigned by the dispatcher (UUID).'
+    value: ${{ steps.dispatch.outputs.run_id }}
+  status_url:
+    description: 'URL where the run progress + final report can be tracked.'
+    value: ${{ steps.dispatch.outputs.status_url }}
+  verdict:
+    description: 'Final verdict (pass | bug | bug_candidate | build_failed | harness_error). Empty if wait_for_completion=false or the wait timed out.'
+    value: ${{ steps.dispatch.outputs.verdict }}
+  report_url:
+    description: 'R2 report URL surfaced once the run completes. Empty until then.'
+    value: ${{ steps.dispatch.outputs.report_url }}
+  recording_url:
+    description: 'R2 screencast (.mp4) URL surfaced once the run completes. Empty until then.'
+    value: ${{ steps.dispatch.outputs.recording_url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Dispatch to Preflight
+      id: dispatch
+      shell: bash
+      env:
+        PF_DISPATCHER_URL: ${{ inputs.dispatcher_url }}
+        PF_HMAC_SECRET: ${{ inputs.hmac_secret }}
+        PF_WORKFLOW: ${{ inputs.workflow }}
+        PF_FORCE: ${{ inputs.force }}
+        GH_REPO: ${{ github.repository }}
+        GH_ACTOR: ${{ github.actor }}
+        GH_EVENT: ${{ github.event_name }}
+        GH_REF: ${{ github.ref }}
+        GH_SHA: ${{ github.sha }}
+        GH_PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number || '' }}
+        GH_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        GH_PR_BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+        # gh_run_id / gh_run_url surface the originating Actions run in
+        # the customer's report.html telemetry — clicking through to
+        # the Action page is the cheapest "who triggered this" deep-link.
+        GH_RUN_ID: ${{ github.run_id }}
+        GH_SERVER_URL: ${{ github.server_url }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${PF_HMAC_SECRET}" ]]; then
+          echo "::error::hmac_secret input is required."
+          exit 1
+        fi
+
+        # Build a stable JSON payload. Field order is locked so the
+        # HMAC signature is reproducible across re-runs of this Action.
+        gh_run_url=""
+        if [[ -n "${GH_RUN_ID}" && -n "${GH_SERVER_URL}" && -n "${GH_REPO}" ]]; then
+          gh_run_url="${GH_SERVER_URL}/${GH_REPO}/actions/runs/${GH_RUN_ID}"
+        fi
+        payload=$(jq -cn \
+          --arg repo        "${GH_REPO}" \
+          --arg actor       "${GH_ACTOR}" \
+          --arg event       "${GH_EVENT}" \
+          --arg ref         "${GH_REF}" \
+          --arg sha         "${GH_SHA}" \
+          --arg pr_number   "${GH_PR_NUMBER}" \
+          --arg head_sha    "${GH_PR_HEAD_SHA}" \
+          --arg base_ref    "${GH_PR_BASE_REF}" \
+          --arg workflow    "${PF_WORKFLOW}" \
+          --arg force       "${PF_FORCE}" \
+          --arg gh_run_id   "${GH_RUN_ID}" \
+          --arg gh_run_url  "${gh_run_url}" \
+          '{
+            repo: $repo,
+            actor: $actor,
+            event: $event,
+            ref: $ref,
+            sha: $sha,
+            pr_number: $pr_number,
+            head_sha: $head_sha,
+            base_ref: $base_ref,
+            workflow: (if $workflow != "" then $workflow else null end),
+            force: ($force == "true"),
+            gh_run_id: (if $gh_run_id != "" then $gh_run_id else null end),
+            gh_run_url: (if $gh_run_url != "" then $gh_run_url else null end)
+          } | with_entries(select(.value != null))')
+
+        # HMAC-SHA256 over the raw payload bytes. Header format matches
+        # GitHub's `X-Hub-Signature-256` convention so the dispatcher
+        # reuses one verifier for both webhook + dispatch entrypoints.
+        sig=$(printf '%s' "${payload}" \
+          | openssl dgst -sha256 -hmac "${PF_HMAC_SECRET}" -binary \
+          | xxd -p -c 256)
+
+        # POST. Capture HTTP status + body separately so we can fail
+        # the action on non-2xx with a useful message.
+        tmp=$(mktemp)
+        http_code=$(curl -sS -o "${tmp}" -w '%{http_code}' \
+          -X POST "${PF_DISPATCHER_URL}" \
+          -H "Content-Type: application/json" \
+          -H "X-Preflight-Signature-256: sha256=${sig}" \
+          -H "X-Preflight-Event: dispatch" \
+          --data "${payload}")
+        body=$(cat "${tmp}")
+        rm -f "${tmp}"
+
+        echo "Dispatcher response (${http_code}):"
+        echo "${body}"
+
+        if [[ "${http_code}" != "200" && "${http_code}" != "202" ]]; then
+          echo "::error::Dispatcher rejected the dispatch (HTTP ${http_code})."
+          exit 1
+        fi
+
+        run_id=$(echo "${body}" | jq -r '.run_id // ""')
+        status_url=$(echo "${body}" | jq -r '.status_url // ""')
+        if [[ -n "${run_id}" ]]; then
+          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
+        fi
+        if [[ -n "${status_url}" ]]; then
+          echo "status_url=${status_url}" >> "${GITHUB_OUTPUT}"
+        fi
+
+    # Poll the preflight check-run until terminal (or wait_timeout_s
+    # elapses). Surfaces verdict + report URL inline in the workflow
+    # summary so customers don't have to chase external dashboards.
+    # The check-run is created by the Preflight GitHub App on the head
+    # sha, with `external_id == run_id` and `name == "preflight"`.
+    - name: Wait for Preflight + emit summary
+      if: ${{ inputs.wait_for_completion == 'true' && steps.dispatch.outputs.run_id != '' }}
+      shell: bash
+      env:
+        PF_RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        PF_STATUS_URL: ${{ steps.dispatch.outputs.status_url }}
+        PF_TIMEOUT_S: ${{ inputs.wait_timeout_s }}
+        PF_GH_TOKEN: ${{ inputs.github_token }}
+        GH_REPO: ${{ github.repository }}
+        GH_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        set -uo pipefail
+
+        deadline=$(( $(date +%s) + PF_TIMEOUT_S ))
+        echo "Polling /repos/${GH_REPO}/commits/${GH_HEAD_SHA}/check-runs for run_id=${PF_RUN_ID} (timeout=${PF_TIMEOUT_S}s)…"
+
+        verdict=""
+        report_url=""
+        recording_url=""
+        check_html=""
+        check_summary=""
+
+        while [[ $(date +%s) -lt ${deadline} ]]; do
+          checks=$(curl -sS \
+            -H "Authorization: token ${PF_GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GH_REPO}/commits/${GH_HEAD_SHA}/check-runs?check_name=preflight&filter=all&per_page=100")
+
+          # Find the entry whose external_id matches our run_id. There can
+          # be multiple "preflight" check-runs on the same SHA (one per
+          # GitHub Action job + one from the Preflight App); the
+          # external_id pin disambiguates. `filter=all` is critical — the
+          # default `latest` dedupes by (app, name) and hides this run's
+          # check-run as soon as the NEXT preflight run starts on the same
+          # SHA, so back-to-back dispatches would each time out at 40 min.
+          mine=$(echo "${checks}" | jq -c --arg ext "${PF_RUN_ID}" '.check_runs[]? | select(.external_id == $ext)')
+
+          if [[ -n "${mine}" && "${mine}" != "null" ]]; then
+            status=$(echo "${mine}" | jq -r '.status // ""')
+            conclusion=$(echo "${mine}" | jq -r '.conclusion // ""')
+            check_html=$(echo "${mine}" | jq -r '.html_url // ""')
+            check_summary=$(echo "${mine}" | jq -r '.output.summary // ""')
+
+            if [[ "${status}" == "completed" ]]; then
+              # The dispatcher sets check-run.output.summary to a
+              # multi-line markdown shape:
+              #   **<customer-label>**
+              #
+              #   [Full report](<reportUrl>)
+              #   [Watch recording](<recordingUrl>)
+              # Pull each link out by its anchor text so the URLs are
+              # surfaced as their own GITHUB_STEP_SUMMARY rows. Verdict
+              # comes from the check-run conclusion field below since the
+              # summary uses customer-facing prose, not the raw tag.
+              verdict=$(printf '%s' "${check_summary}" | sed -n 's/^Verdict: \([a-z_]*\).*/\1/p' | head -n1)
+              report_url=$(printf '%s' "${check_summary}" | sed -n 's/^\[Full report\](\(https:\/\/[^)]*\)).*/\1/p' | head -n1)
+              recording_url=$(printf '%s' "${check_summary}" | sed -n 's/^\[Watch recording\](\(https:\/\/[^)]*\)).*/\1/p' | head -n1)
+              if [[ -z "${report_url}" ]]; then
+                # Legacy shape — runners that pre-date the labelled-link
+                # format put a single `(https://…)` on the second line.
+                report_url=$(printf '%s' "${check_summary}" | sed -n 's/.*(\(https:\/\/[^)]*\)).*/\1/p' | head -n1)
+              fi
+              if [[ -z "${verdict}" ]]; then
+                # GitHub maps build_failed → action_required at the
+                # conclusion field; recover the verdict from there.
+                case "${conclusion}" in
+                  success) verdict="pass" ;;
+                  action_required) verdict="build_failed" ;;
+                  failure) verdict="bug" ;;
+                  *) verdict="${conclusion:-unknown}" ;;
+                esac
+              fi
+              break
+            fi
+          fi
+          sleep 15
+        done
+
+        {
+          echo "## Preflight"
+          echo
+          if [[ -n "${verdict}" ]]; then
+            echo "**Verdict**: \`${verdict}\`"
+          else
+            echo "**Verdict**: still running at timeout (${PF_TIMEOUT_S}s)"
+          fi
+          echo
+          echo "**Run id**: \`${PF_RUN_ID}\`"
+          if [[ -n "${PF_STATUS_URL}" ]]; then
+            echo "**Status page**: ${PF_STATUS_URL}"
+          fi
+          # Surface report + recording as anchor-text-only hyperlinks so
+          # the GH Actions job-summary card doesn't render a 600-char
+          # presigned R2 URL verbatim. The raw URLs are still emitted as
+          # action outputs (report_url / recording_url) for downstream
+          # consumers — this just keeps the human-facing surface clean.
+          links=""
+          if [[ -n "${report_url}" ]]; then
+            links="[Full report](${report_url})"
+          fi
+          if [[ -n "${recording_url}" ]]; then
+            if [[ -n "${links}" ]]; then
+              links="${links} · [Watch recording](${recording_url})"
+            else
+              links="[Watch recording](${recording_url})"
+            fi
+          fi
+          if [[ -n "${links}" ]]; then
+            echo
+            echo "${links}"
+          fi
+          if [[ -n "${check_html}" ]]; then
+            echo "**Check run**: [Open in GitHub](${check_html})"
+          fi
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        if [[ -n "${verdict}" ]]; then
+          echo "verdict=${verdict}" >> "${GITHUB_OUTPUT}"
+        fi
+        if [[ -n "${report_url}" ]]; then
+          echo "report_url=${report_url}" >> "${GITHUB_OUTPUT}"
+        fi
+        if [[ -n "${recording_url}" ]]; then
+          echo "recording_url=${recording_url}" >> "${GITHUB_OUTPUT}"
+        fi
+
+        # Pass even when the verdict is bug/bug_candidate/build_failed —
+        # the action's job is to FIRE Preflight, not to gate the customer's
+        # CI on the QA verdict. The customer can add a separate job that
+        # consumes outputs.verdict to gate releases.
+        exit 0
